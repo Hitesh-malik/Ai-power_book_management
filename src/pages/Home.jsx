@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import BookCard from "../components/BookCard";
 import BookLoader from "../components/BookLoader";
+import { FaMicrophone, FaMicrophoneSlash, FaTimesCircle, FaSearch, FaTimes } from "react-icons/fa";
 
 const API_BASE_URL = "http://localhost:8080/api/books";
 
+// ---------- ConfirmModal ----------
 function ConfirmModal({ open, onClose, onConfirm, book }) {
   if (!open) return null;
   return (
@@ -19,15 +21,11 @@ function ConfirmModal({ open, onClose, onConfirm, book }) {
   );
 }
 
-import { FaTimes } from "react-icons/fa";
-
-export function EditModal({ open, book, onSave, onClose }) {
+// ---------- EditModal ----------
+function EditModal({ open, book, onSave, onClose }) {
   const [form, setForm] = useState(book || {});
 
-  useEffect(() => {
-    setForm(book || {});
-  }, [book]);
-
+  useEffect(() => { setForm(book || {}); }, [book]);
   if (!open || !book) return null;
 
   function handleChange(e) {
@@ -129,13 +127,21 @@ export function EditModal({ open, book, onSave, onClose }) {
   );
 }
 
-
+// ---------- Main Home ----------
 export default function Home() {
   const [books, setBooks] = useState([]);
+  const [allBooks, setAllBooks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [deleteBook, setDeleteBook] = useState(null);
   const [editBook, setEditBook] = useState(null);
+
+  // SEARCH
+  const [searchText, setSearchText] = useState("");
+  const [isRecording, setIsRecording] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
+  const mediaRecorderRef = useRef(null);
+  const chunksRef = useRef([]);
 
   function fetchBooks() {
     setLoading(true);
@@ -145,13 +151,100 @@ export default function Home() {
         if (!res.ok) throw new Error("Failed to fetch books.");
         return res.json();
       })
-      .then(data => setBooks(data))
+      .then(data => {
+        setBooks(data);
+        setAllBooks(data);
+      })
       .catch(err => setError(err.message || "Error fetching books"))
       .finally(() => setLoading(false));
   }
 
   useEffect(() => { fetchBooks(); }, []);
 
+  // --- Text Search ---
+  function handleTextSearch(e) {
+    if (e.key === "Enter" || e.type === "click") {
+      setLoading(true);
+      fetch(`${API_BASE_URL}/voice-text-search`, {
+        method: "POST",
+        body: new URLSearchParams({ query: searchText }),
+        headers: { "Content-Type": "application/x-www-form-urlencoded" }
+      })
+        .then(res => {
+          if (!res.ok) throw new Error("Search failed.");
+          return res.json();
+        })
+        .then(data => setBooks(data))
+        .catch(() => setBooks([]))
+        .finally(() => setLoading(false));
+    }
+  }
+
+  // --- Voice Search ---
+  async function handleSpeechRecord() {
+    setVoiceError("");
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      setVoiceError("This browser does not support voice search.");
+      return;
+    }
+    if (isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new window.MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorderRef.current = mediaRecorder;
+      chunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          chunksRef.current.push(e.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        sendAudioToBackend(audioBlob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      setVoiceError("Microphone access denied or unavailable.");
+    }
+  }
+
+  async function sendAudioToBackend(audioBlob) {
+    setVoiceError("");
+    setLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append("audio", audioBlob, "recording.webm");
+      const res = await fetch(`${API_BASE_URL}/voice-text-search`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) throw new Error("Voice search failed");
+      const data = await res.json();
+      setBooks(data);
+    } catch (err) {
+      setVoiceError("Voice search error: " + (err.message || "Unknown error"));
+      setBooks([]);
+    }
+    setLoading(false);
+  }
+
+  // --- Reset search ---
+  function handleClearSearch() {
+    setSearchText("");
+    setVoiceError("");
+    setBooks(allBooks);
+  }
+
+  // --- Delete ---
   function handleDeleteConfirm() {
     fetch(`${API_BASE_URL}/${deleteBook.id}`, { method: "DELETE" })
       .then(() => {
@@ -160,6 +253,7 @@ export default function Home() {
       });
   }
 
+  // --- Edit ---
   async function handleEditSave(updated) {
     const formData = new FormData();
     formData.append(
@@ -173,7 +267,43 @@ export default function Home() {
 
   return (
     <div className="min-h-[90vh] bg-gray-100 py-8 px-4">
-      <h2 className="text-3xl font-bold mb-7 text-center text-gray-900">My Book Library</h2>
+      <h2 className="text-3xl font-bold mb-4 text-center text-gray-900">My Book Library</h2>
+      {/* Search */}
+      <div className="flex justify-center items-center mb-8 gap-2 flex-wrap">
+        <div className="flex items-center rounded-lg border border-gray-300 bg-white shadow px-3 py-1 gap-1 w-full max-w-md">
+          <FaSearch className="text-gray-400 mr-2" />
+          <input
+            type="text"
+            className="flex-1 px-2 py-2 bg-transparent focus:outline-none text-base"
+            placeholder="Search books by title, author, etc..."
+            value={searchText}
+            onChange={e => setSearchText(e.target.value)}
+            onKeyDown={handleTextSearch}
+          />
+          {searchText &&
+            <button className="text-gray-400 hover:text-red-400" onClick={handleClearSearch} title="Clear">
+              <FaTimesCircle size={18} />
+            </button>
+          }
+          {/* Voice Search Button */}
+          <button
+            className={`ml-2 px-3 py-2 rounded-full transition-colors ${isRecording ? "bg-red-100 text-red-600" : "bg-blue-100 text-blue-600"}`}
+            title={isRecording ? "Stop recording" : "Voice search"}
+            onClick={handleSpeechRecord}
+          >
+            {isRecording ? <FaMicrophoneSlash size={20} /> : <FaMicrophone size={20} />}
+          </button>
+        </div>
+        <button
+          onClick={e => handleTextSearch({ type: "click" })}
+          className="ml-3 px-5 py-2 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition shadow"
+        >
+          Search
+        </button>
+      </div>
+      {voiceError && (
+        <div className="text-center text-red-600 mb-4 font-semibold">{voiceError}</div>
+      )}
       {error && (
         <div className="text-center text-red-600 mb-6 font-semibold">{error}</div>
       )}
@@ -192,7 +322,7 @@ export default function Home() {
             : <div className="text-gray-400 text-lg mt-10">No books found.</div>
         }
       </div>
-      {/* Confirm & Edit Modals */}
+      {/* Modals */}
       <ConfirmModal
         open={!!deleteBook}
         onClose={() => setDeleteBook(null)}
